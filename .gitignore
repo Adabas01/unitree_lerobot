@@ -8,5 +8,6 @@ unitree_lerobot.egg-info
 cam_high.jpg
 cam_right_wrist.jpg
 cam_left_wrist.jpg
+unitree_lerobot/cam_config_client.yaml
 data/
 ./data

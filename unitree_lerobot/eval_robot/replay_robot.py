@@ -55,6 +55,15 @@ def _expected_action_dim(cfg: EvalRealConfig) -> int:
     return arm_dof + (2 * ee_dof) + mobile_action_dim
 
 
+def _episode_row_indices(dataset: LeRobotDataset, episode_index: int) -> list[int]:
+    rows = []
+    for row_idx, value in enumerate(dataset.hf_dataset["episode_index"]):
+        ep_idx = int(value.item()) if hasattr(value, "item") else int(value)
+        if ep_idx == episode_index:
+            rows.append(row_idx)
+    return rows
+
+
 @parser.wrap()
 def replay_main(cfg: EvalRealConfig):
     logger_mp.info(f"Arguments: {cfg}")
@@ -66,11 +75,19 @@ def replay_main(cfg: EvalRealConfig):
         rerun_logger = RerunLogger()
 
     dataset = LeRobotDataset(repo_id=cfg.repo_id, root=cfg.root or None, episodes=[cfg.episodes])
-    actions = dataset.hf_dataset.select_columns("action")
+    episode_rows = _episode_row_indices(dataset, cfg.episodes)
+    if not episode_rows:
+        available = sorted(
+            {
+                int(value.item()) if hasattr(value, "item") else int(value)
+                for value in dataset.hf_dataset["episode_index"]
+            }
+        )
+        raise ValueError(f"Episode {cfg.episodes} not found. Available episodes: {available}")
 
     # Validate the episode before any DDS publisher is created.
-    from_idx = dataset.meta.episodes["dataset_from_index"][0]
-    step = dataset[from_idx]
+    first_row_idx = episode_rows[0]
+    step = dataset.hf_dataset[first_row_idx]
     first_action = _as_numpy(step["action"])
     expected_dim = _expected_action_dim(cfg)
     if first_action.ndim != 1 or first_action.shape[0] < expected_dim:
@@ -89,7 +106,7 @@ def replay_main(cfg: EvalRealConfig):
             f"{expected_dim} arm values will be replayed."
         )
     logger_mp.info(
-        f"Validated episode {cfg.episodes}: {dataset.num_frames} frames, action_dim={first_action.shape[0]}."
+        f"Validated episode {cfg.episodes}: {len(episode_rows)} frames, action_dim={first_action.shape[0]}."
     )
 
     if not cfg.send_real_robot:
@@ -122,11 +139,11 @@ def replay_main(cfg: EvalRealConfig):
             tau = arm_ik.solve_tau(init_left_arm_pose)
             arm_ctrl.ctrl_dual_arm(init_left_arm_pose, tau)
             time.sleep(1)
-            for idx in range(dataset.num_frames):
+            for idx, row_idx in enumerate(episode_rows):
                 loop_start_time = time.perf_counter()
 
                 left_ee_state = right_ee_state = np.array([])
-                action_np = _as_numpy(actions[idx]["action"])
+                action_np = _as_numpy(dataset.hf_dataset[row_idx]["action"])
 
                 # exec action
                 arm_action = action_np[:arm_dof]

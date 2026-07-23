@@ -48,6 +48,8 @@ This repository is used for `lerobot training validation`(Supports LeRobot datas
 | utils      | `unitree data processing tool `                                                                          |
 | eval_robot | `unitree real machine inference verification of the model`                                               |
 
+For G1-D dataset replay commands and notes, see [docs/g1d_replay.md](./docs/g1d_replay.md).
+
 # 1. 📦 Environment Setup
 
 ## 1.1 🦾 LeRobot Environment Setup
