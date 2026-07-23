@@ -2,6 +2,7 @@ from multiprocessing import shared_memory, Value, Array, Lock
 from typing import Any
 import numpy as np
 import argparse
+import inspect
 import threading
 import torch
 import cv2
@@ -83,6 +84,12 @@ def _resolve_out_len(spec: dict[str, Any]) -> int:
     return int(spec.get("out_len", 2 * int(spec["dof"])))
 
 
+def _build_controller(controller_cls, *args, **kwargs):
+    supported = inspect.signature(controller_cls).parameters
+    filtered_kwargs = {key: value for key, value in kwargs.items() if key in supported}
+    return controller_cls(*args, **filtered_kwargs)
+
+
 def setup_robot_interface(args: argparse.Namespace) -> dict[str, Any]:
     """
     Initializes robot controllers and IK solvers based on configuration.
@@ -91,7 +98,12 @@ def setup_robot_interface(args: argparse.Namespace) -> dict[str, Any]:
     arm_spec = ARM_CONFIG[args.arm]
     arm_ik = arm_spec["ik_solver"]()
     is_sim = getattr(args, "sim", False)
-    arm_ctrl = arm_spec["controller"](motion_mode=args.motion, simulation_mode=is_sim)
+    arm_ctrl = _build_controller(
+        arm_spec["controller"],
+        motion_mode=args.motion,
+        simulation_mode=is_sim,
+        dds_timeout=getattr(args, "dds_timeout", 8.0),
+    )
 
     # ---------- End Effector (optional) ----------
     ee_ctrl, ee_shared_mem, ee_dof = None, {}, 0
@@ -112,7 +124,16 @@ def setup_robot_interface(args: argparse.Namespace) -> dict[str, Any]:
 
         state_arr, action_arr = Array("d", out_len, lock=False), Array("d", out_len, lock=False)
 
-        ee_ctrl = spec["controller"](left_in, right_in, data_lock, state_arr, action_arr, simulation_mode=is_sim)
+        ee_ctrl = _build_controller(
+            spec["controller"],
+            left_in,
+            right_in,
+            data_lock,
+            state_arr,
+            action_arr,
+            simulation_mode=is_sim,
+            dds_timeout=getattr(args, "dds_timeout", 8.0),
+        )
 
         ee_shared_mem = {
             "left": left_in,

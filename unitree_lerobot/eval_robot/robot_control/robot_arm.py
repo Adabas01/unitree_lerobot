@@ -67,7 +67,7 @@ class DataBuffer:
 
 
 class G1_29_ArmController:
-    def __init__(self, motion_mode=False, simulation_mode=False):
+    def __init__(self, motion_mode=False, simulation_mode=False, dds_timeout=8.0):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
@@ -108,7 +108,13 @@ class G1_29_ArmController:
         self.subscribe_thread.daemon = True
         self.subscribe_thread.start()
 
+        wait_start = time.monotonic()
         while not self.lowstate_buffer.GetData():
+            if dds_timeout and time.monotonic() - wait_start > dds_timeout:
+                raise TimeoutError(
+                    "[G1_29_ArmController] Timed out waiting for rt/lowstate. "
+                    "Check robot power/mode, DDS domain, and --network_interface."
+                )
             time.sleep(0.1)
             logger_mp.warning("[G1_29_ArmController] Waiting to subscribe dds...")
         logger_mp.info("[G1_29_ArmController] Subscribe dds ok.")
@@ -120,6 +126,7 @@ class G1_29_ArmController:
         self.msg.mode_machine = self.get_mode_machine()
 
         self.all_motor_q = self.get_current_motor_q()
+        self.q_target = self.get_current_dual_arm_q().copy()
         logger_mp.info(f"Current all body motor state q:\n{self.all_motor_q} \n")
         logger_mp.info(f"Current two arms motor state q:\n{self.get_current_dual_arm_q()}\n")
         logger_mp.info("Lock all joints except two arms...\n")

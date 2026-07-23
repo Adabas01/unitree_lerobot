@@ -10,12 +10,15 @@ import numpy as np
 from multiprocessing.sharedctypes import SynchronizedArray
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_lerobot.eval_robot.make_robot import (
+    ARM_CONFIG,
+    EE_CONFIG,
     setup_image_client,
     setup_robot_interface,
     process_images_and_observations,
 )
-from unitree_lerobot.eval_robot.utils.utils import cleanup_resources, EvalRealConfig
+from unitree_lerobot.eval_robot.utils.utils import EvalRealConfig
 
 from unitree_lerobot.eval_robot.utils.rerun_visualizer import RerunLogger, visualization_data
 from unitree_lerobot.eval_robot.utils.utils import to_list, to_scalar
@@ -26,14 +29,78 @@ logger_mp = logging_mp.getLogger(__name__)
 logger_mp.setLevel(logging_mp.INFO)
 
 
+def _as_numpy(value):
+    if hasattr(value, "detach"):
+        return value.detach().cpu().numpy()
+    if hasattr(value, "cpu"):
+        return value.cpu().numpy()
+    return np.asarray(value)
+
+
+def _expected_action_dim(cfg: EvalRealConfig) -> int:
+    arm_dof = int(ARM_CONFIG[cfg.arm]["dof"])
+
+    ee_dof = 0
+    ee_key = (cfg.ee or "").lower()
+    if ee_key:
+        if ee_key not in EE_CONFIG:
+            raise ValueError(f"Unknown end-effector '{cfg.ee}'. Available: {list(EE_CONFIG.keys())}")
+        ee_dof = int(EE_CONFIG[ee_key]["dof"])
+
+    base_type = getattr(cfg, "base_type", "legs")
+    mobile_action_dim = 0
+    if base_type != "legs":
+        mobile_action_dim = 3 if base_type == "mobile_lift" else 1
+
+    return arm_dof + (2 * ee_dof) + mobile_action_dim
+
+
 @parser.wrap()
 def replay_main(cfg: EvalRealConfig):
     logger_mp.info(f"Arguments: {cfg}")
 
+    image_client = None
+    camera_config = None
+
     if cfg.visualization:
         rerun_logger = RerunLogger()
 
-    image_info = setup_image_client(cfg)
+    dataset = LeRobotDataset(repo_id=cfg.repo_id, root=cfg.root or None, episodes=[cfg.episodes])
+    actions = dataset.hf_dataset.select_columns("action")
+
+    # Validate the episode before any DDS publisher is created.
+    from_idx = dataset.meta.episodes["dataset_from_index"][0]
+    step = dataset[from_idx]
+    first_action = _as_numpy(step["action"])
+    expected_dim = _expected_action_dim(cfg)
+    if first_action.ndim != 1 or first_action.shape[0] < expected_dim:
+        raise ValueError(
+            f"Dataset action dim is {first_action.shape}, but {cfg.arm} + {cfg.ee or 'no EE'} expects "
+            f"at least {expected_dim} values."
+        )
+    if first_action.shape[0] != expected_dim:
+        if cfg.ee:
+            raise ValueError(
+                f"Dataset action dim is {first_action.shape}, but {cfg.arm} + {cfg.ee} expects "
+                f"{expected_dim} values."
+            )
+        logger_mp.warning(
+            f"Dataset action_dim={first_action.shape[0]}; configured no EE, so only the first "
+            f"{expected_dim} arm values will be replayed."
+        )
+    logger_mp.info(
+        f"Validated episode {cfg.episodes}: {dataset.num_frames} frames, action_dim={first_action.shape[0]}."
+    )
+
+    if not cfg.send_real_robot:
+        logger_mp.info("send_real_robot=false; validation complete, no DDS or robot control initialized.")
+        return
+
+    if cfg.visualization:
+        image_client, camera_config = setup_image_client(cfg)
+
+    domain_id = 1 if getattr(cfg, "sim", False) else 0
+    ChannelFactoryInitialize(domain_id, cfg.network_interface or None)
     robot_interface = setup_robot_interface(cfg)
 
     """The main control and evaluation loop."""
@@ -41,77 +108,65 @@ def replay_main(cfg: EvalRealConfig):
     arm_ctrl, arm_ik, ee_shared_mem, arm_dof, ee_dof = (
         robot_interface[key] for key in ["arm_ctrl", "arm_ik", "ee_shared_mem", "arm_dof", "ee_dof"]
     )
-    tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam = (
-        image_info[key]
-        for key in [
-            "tv_img_array",
-            "wrist_img_array",
-            "tv_img_shape",
-            "wrist_img_shape",
-            "is_binocular",
-            "has_wrist_cam",
-        ]
-    )
 
     logger_mp.info(f"Starting evaluation loop at {cfg.frequency} Hz.")
 
-    dataset = LeRobotDataset(repo_id=cfg.repo_id, root=cfg.root, episodes=[cfg.episodes])
-    actions = dataset.hf_dataset.select_columns("action")
-
     # init pose
-    from_idx = dataset.meta.episodes["dataset_from_index"][0]
-    step = dataset[from_idx]
-    init_left_arm_pose = step["observation.state"][:14].cpu().numpy()
+    init_left_arm_pose = _as_numpy(step["observation.state"])[:arm_dof]
 
-    user_input = input("Please enter the start signal (enter 's' to start the subsequent program):")
-    if user_input.lower() == "s":
-        # "The initial positions of the robot's arm and fingers take the initial positions during data recording."
-        logger_mp.info("Initializing robot to starting pose...")
-        tau = arm_ik.solve_tau(init_left_arm_pose)
-        arm_ctrl.ctrl_dual_arm(init_left_arm_pose, tau)
-        time.sleep(1)
-        for idx in range(dataset.num_frames):
-            loop_start_time = time.perf_counter()
+    try:
+        user_input = input("Please enter the start signal (enter 's' to start the subsequent program):")
+        if user_input.lower() == "s":
+            # The initial robot pose should match the first recorded frame.
+            logger_mp.info("Initializing robot to starting pose...")
+            tau = arm_ik.solve_tau(init_left_arm_pose)
+            arm_ctrl.ctrl_dual_arm(init_left_arm_pose, tau)
+            time.sleep(1)
+            for idx in range(dataset.num_frames):
+                loop_start_time = time.perf_counter()
 
-            left_ee_state = right_ee_state = np.array([])
-            action_np = actions[idx]["action"].numpy()
+                left_ee_state = right_ee_state = np.array([])
+                action_np = _as_numpy(actions[idx]["action"])
 
-            # exec action
-            arm_action = action_np[:arm_dof]
-            tau = arm_ik.solve_tau(arm_action)
-            arm_ctrl.ctrl_dual_arm(arm_action, tau)
-            logger_mp.info(f"arm_action {arm_action}, tau {tau}")
+                # exec action
+                arm_action = action_np[:arm_dof]
+                tau = arm_ik.solve_tau(arm_action)
+                arm_ctrl.ctrl_dual_arm(arm_action, tau)
+                logger_mp.info(f"arm_action {arm_action}, tau {tau}")
 
-            if cfg.ee:
-                ee_action_start_idx = arm_dof
-                left_ee_action = action_np[ee_action_start_idx : ee_action_start_idx + ee_dof]
-                right_ee_action = action_np[ee_action_start_idx + ee_dof : ee_action_start_idx + 2 * ee_dof]
-                logger_mp.info(f"EE Action: left {left_ee_action}, right {right_ee_action}")
+                if cfg.ee:
+                    ee_action_start_idx = arm_dof
+                    left_ee_action = action_np[ee_action_start_idx : ee_action_start_idx + ee_dof]
+                    right_ee_action = action_np[ee_action_start_idx + ee_dof : ee_action_start_idx + 2 * ee_dof]
+                    logger_mp.info(f"EE Action: left {left_ee_action}, right {right_ee_action}")
 
-                with ee_shared_mem["lock"]:
-                    full_state = np.array(ee_shared_mem["state"][:])
-                    left_ee_state = full_state[:ee_dof]
-                    right_ee_state = full_state[ee_dof:]
+                    with ee_shared_mem["lock"]:
+                        full_state = np.array(ee_shared_mem["state"][:])
+                        left_ee_state = full_state[:ee_dof]
+                        right_ee_state = full_state[ee_dof:]
 
-                if isinstance(ee_shared_mem["left"], SynchronizedArray):
-                    ee_shared_mem["left"][:] = to_list(left_ee_action)
-                    ee_shared_mem["right"][:] = to_list(right_ee_action)
-                elif hasattr(ee_shared_mem["left"], "value") and hasattr(ee_shared_mem["right"], "value"):
-                    ee_shared_mem["left"].value = to_scalar(left_ee_action)
-                    ee_shared_mem["right"].value = to_scalar(right_ee_action)
+                    if isinstance(ee_shared_mem["left"], SynchronizedArray):
+                        ee_shared_mem["left"][:] = to_list(left_ee_action)
+                        ee_shared_mem["right"][:] = to_list(right_ee_action)
+                    elif hasattr(ee_shared_mem["left"], "value") and hasattr(ee_shared_mem["right"], "value"):
+                        ee_shared_mem["left"].value = to_scalar(left_ee_action)
+                        ee_shared_mem["right"].value = to_scalar(right_ee_action)
 
-            if cfg.visualization:
-                observation, current_arm_q = process_images_and_observations(
-                    tv_img_array, wrist_img_array, tv_img_shape, wrist_img_shape, is_binocular, has_wrist_cam, arm_ctrl
-                )
-                state = np.concatenate((current_arm_q, left_ee_state, right_ee_state))
+                if cfg.visualization:
+                    observation, current_arm_q = process_images_and_observations(
+                        image_client,
+                        camera_config,
+                        arm_ctrl,
+                    )
+                    state = np.concatenate((current_arm_q, left_ee_state, right_ee_state))
 
-                visualization_data(idx, observation, state, action_np, rerun_logger)
+                    visualization_data(idx, observation, state, action_np, rerun_logger)
 
-            # Maintain frequency
-            time.sleep(max(0, (1.0 / cfg.frequency) - (time.perf_counter() - loop_start_time)))
-
-    cleanup_resources(image_info)
+                # Maintain frequency
+                time.sleep(max(0, (1.0 / cfg.frequency) - (time.perf_counter() - loop_start_time)))
+    finally:
+        if image_client is not None:
+            image_client.close()
 
 
 if __name__ == "__main__":

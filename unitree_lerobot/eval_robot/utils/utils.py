@@ -121,6 +121,10 @@ class EvalRealConfig:
     episodes: int = 0
     frequency: float = 30.0
 
+    image_host: str = "192.168.212.34"
+    network_interface: str = ""
+    dds_timeout: float = 8.0
+
     # Basic control parameters
     arm: str = "G1_29"  # G1_29, G1_23
     ee: str = "dex3"  # dex3, dex1, inspire1, brainco

@@ -254,6 +254,7 @@ class Dex1_1_Gripper_Controller:
         fps=200.0,
         Unit_Test=False,
         simulation_mode=False,
+        dds_timeout=8.0,
     ):
         """
         [note] A *_array type parameter requires using a multiprocessing Array, because it needs to be passed to the internal child process
@@ -299,10 +300,21 @@ class Dex1_1_Gripper_Controller:
         self.subscribe_state_thread.daemon = True
         self.subscribe_state_thread.start()
 
+        wait_start = time.monotonic()
         while not self.gripper_sub_ready:
+            if dds_timeout and time.monotonic() - wait_start > dds_timeout:
+                raise TimeoutError(
+                    "[Dex1_1_Gripper_Controller] Timed out waiting for rt/dex1/*/state. "
+                    "Check the Dex1 service, robot-side --network interface, and DDS type compatibility."
+                )
             time.sleep(0.01)
             logger_mp.warning("[Dex1_1_Gripper_Controller] Waiting to subscribe dds...")
         logger_mp.info("[Dex1_1_Gripper_Controller] Subscribe dds ok.")
+
+        with left_gripper_value_in.get_lock():
+            left_gripper_value_in.value = self.left_gripper_state_value.value
+        with right_gripper_value_in.get_lock():
+            right_gripper_value_in.value = self.right_gripper_state_value.value
 
         self.gripper_control_thread = threading.Thread(
             target=self.control_thread,
@@ -325,10 +337,10 @@ class Dex1_1_Gripper_Controller:
         while True:
             left_gripper_msg = self.LeftGripperState_subscriber.Read()
             right_gripper_msg = self.RightGripperState_subscriber.Read()
-            self.gripper_sub_ready = True
             if left_gripper_msg is not None and right_gripper_msg is not None:
                 self.left_gripper_state_value.value = left_gripper_msg.states[0].q
                 self.right_gripper_state_value.value = right_gripper_msg.states[0].q
+                self.gripper_sub_ready = True
             time.sleep(0.002)
 
     def ctrl_dual_gripper(self, dual_gripper_action):
