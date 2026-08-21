@@ -7,9 +7,10 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 def local_push_to_hub(
     repo_id: str,
     root_path: Path = None,
+    private: bool = False,
 ):
     dataset = LeRobotDataset(repo_id=repo_id, root=root_path)
-    dataset.push_to_hub(upload_large_folder=True)
+    dataset.push_to_hub(upload_large_folder=True, private=private)
 
 
 if __name__ == "__main__":

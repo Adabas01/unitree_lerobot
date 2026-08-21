@@ -5,6 +5,8 @@ Script Json to Lerobot.
 # --repo-id     Your unique repo ID on Hugging Face Hub
 # --robot_type  The type of the robot used in the dataset (e.g., Unitree_Z1_Single, Unitree_Z1_Dual, Unitree_G1_Dex1, Unitree_G1_Dex3, Unitree_G1_Brainco, Unitree_G1_Inspire)
 # --push_to_hub Whether or not to upload the dataset to Hugging Face Hub (true or false)
+# --private     Whether to create/push the Hugging Face dataset repo as private
+# --normalize_dex1_gripper Convert Dex1 gripper qpos from raw motor units (0-5.4) to 0-1. Enabled by default.
 
 python unitree_lerobot/utils/convert_unitree_json_to_lerobot.py \
     --raw-dir $HOME/datasets/g1_grabcube_double_hand \
@@ -32,6 +34,15 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from unitree_lerobot.utils.constants import ROBOT_CONFIGS
 
 
+DEX1_GRIPPER_MAX_QPOS = 5.40
+DEX1_GRIPPER_PARTS = {"left_ee.qpos", "right_ee.qpos"}
+DEX1_ROBOT_TYPES = {robot_type for robot_type in ROBOT_CONFIGS if "Dex1" in robot_type}
+
+
+def normalize_dex1_gripper_qpos(qpos: np.ndarray) -> np.ndarray:
+    return np.clip(qpos / DEX1_GRIPPER_MAX_QPOS, 0.0, 1.0)
+
+
 @dataclasses.dataclass(frozen=True)
 class DatasetConfig:
     use_videos: bool = True
@@ -45,7 +56,7 @@ DEFAULT_DATASET_CONFIG = DatasetConfig()
 
 
 class JsonDataset:
-    def __init__(self, data_dirs: Path, robot_type: str) -> None:
+    def __init__(self, data_dirs: Path, robot_type: str, normalize_dex1_gripper: bool = True) -> None:
         """
         Initialize the dataset for loading and processing HDF5 files containing robot manipulation data.
 
@@ -63,6 +74,7 @@ class JsonDataset:
         self.json_state_data_name = ROBOT_CONFIGS[robot_type].json_state_data_name
         self.json_action_data_name = ROBOT_CONFIGS[robot_type].json_action_data_name
         self.camera_to_image_key = ROBOT_CONFIGS[robot_type].camera_to_image_key
+        self.normalize_dex1_gripper = normalize_dex1_gripper and robot_type in DEX1_ROBOT_TYPES
 
     def _init_paths(self) -> None:
         """Initialize episode and task paths."""
@@ -128,6 +140,8 @@ class JsonDataset:
                     qpos = np.array(qpos, dtype=np.float32).flatten()
                 else:
                     qpos = np.array([qpos], dtype=np.float32).flatten()
+                if self.normalize_dex1_gripper and part in DEX1_GRIPPER_PARTS:
+                    qpos = normalize_dex1_gripper_qpos(qpos)
                 data_array = np.concatenate([data_array, qpos])
             result.append(data_array)
         return np.array(result)
@@ -284,8 +298,9 @@ def populate_dataset(
     dataset: LeRobotDataset,
     raw_dir: Path,
     robot_type: str,
+    normalize_dex1_gripper: bool = True,
 ) -> LeRobotDataset:
-    json_dataset = JsonDataset(raw_dir, robot_type)
+    json_dataset = JsonDataset(raw_dir, robot_type, normalize_dex1_gripper=normalize_dex1_gripper)
     for i in tqdm.tqdm(range(len(json_dataset))):
         episode = json_dataset.get_item(i)
 
@@ -319,7 +334,9 @@ def json_to_lerobot(
     robot_type: str,  # e.g., Unitree_Z1_Single, Unitree_Z1_Dual, Unitree_G1_Dex1, Unitree_G1_Dex3, Unitree_G1_Brainco, Unitree_G1_Inspire
     *,
     push_to_hub: bool = False,
+    private: bool = False,
     mode: Literal["video", "image"] = "video",
+    normalize_dex1_gripper: bool = True,
     dataset_config: DatasetConfig = DEFAULT_DATASET_CONFIG,
 ):
     if (HF_LEROBOT_HOME / repo_id).exists():
@@ -337,18 +354,20 @@ def json_to_lerobot(
         dataset,
         raw_dir,
         robot_type=robot_type,
+        normalize_dex1_gripper=normalize_dex1_gripper,
     )
 
     if push_to_hub:
-        dataset.push_to_hub(upload_large_folder=True)
+        dataset.push_to_hub(upload_large_folder=True, private=private)
 
 
 def local_push_to_hub(
     repo_id: str,
     root_path: Path,
+    private: bool = False,
 ):
     dataset = LeRobotDataset(repo_id=repo_id, root=root_path)
-    dataset.push_to_hub(upload_large_folder=True)
+    dataset.push_to_hub(upload_large_folder=True, private=private)
 
 
 if __name__ == "__main__":
