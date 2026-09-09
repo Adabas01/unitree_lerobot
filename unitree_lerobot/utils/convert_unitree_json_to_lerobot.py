@@ -3,7 +3,7 @@ Script Json to Lerobot.
 
 # --raw-dir     Corresponds to the directory of your JSON dataset
 # --repo-id     Your unique repo ID on Hugging Face Hub
-# --robot_type  The type of the robot used in the dataset (e.g., Unitree_Z1_Single, Unitree_Z1_Dual, Unitree_G1_Dex1, Unitree_G1_Dex3, Unitree_G1_Brainco, Unitree_G1_Inspire)
+# --robot_type  The type of the robot used in the dataset (e.g., Unitree_Z1_Single, Unitree_Z1_Dual, Unitree_G1_Dex1, Unitree_G1_Dex1_TorsoYaw, Unitree_G1_Dex3, Unitree_G1_Brainco, Unitree_G1_Inspire)
 # --push_to_hub Whether or not to upload the dataset to Hugging Face Hub (true or false)
 # --private     Whether to create/push the Hugging Face dataset repo as private
 # --normalize_dex1_gripper Convert Dex1 gripper qpos from raw motor units (0-5.4) to 0-1. Enabled by default.
@@ -331,7 +331,7 @@ def populate_dataset(
 def json_to_lerobot(
     raw_dir: Path,
     repo_id: str,
-    robot_type: str,  # e.g., Unitree_Z1_Single, Unitree_Z1_Dual, Unitree_G1_Dex1, Unitree_G1_Dex3, Unitree_G1_Brainco, Unitree_G1_Inspire
+    robot_type: str,  # e.g., Unitree_Z1_Single, Unitree_Z1_Dual, Unitree_G1_Dex1, Unitree_G1_Dex1_TorsoYaw, Unitree_G1_Dex3, Unitree_G1_Brainco, Unitree_G1_Inspire
     *,
     push_to_hub: bool = False,
     private: bool = False,

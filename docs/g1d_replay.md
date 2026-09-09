@@ -1,6 +1,6 @@
 # G1-D Dataset Replay Guide
 
-This guide documents the working G1-D replay setup for a local LeRobot dataset recorded from G1-29 arms with Dex1 grippers.
+This guide documents the working G1-D replay setup for a local LeRobot dataset recorded from G1-29 arms with Dex1 grippers, with optional torso yaw.
 
 The tested local dataset is:
 
@@ -149,6 +149,61 @@ PYTHONNOUSERSITE=1 python unitree_lerobot/eval_robot/replay_robot.py \
   --dds_timeout=8
 ```
 
+## Convert Torso Yaw Recordings
+
+If the raw XR recording was collected with `--record-torso-yaw`, convert it with the torso-yaw robot type. This appends `body.torso_yaw` to `observation.state` and `body.torso_yaw_target` to `action`.
+
+```bash
+cd ~/unitree_g1/unitree_lerobot
+conda activate unitree_lerobot
+
+PYTHONNOUSERSITE=1 python unitree_lerobot/utils/convert_unitree_json_to_lerobot.py \
+  --raw-dir="$HOME/datasets/g1_torso_yaw_raw" \
+  --repo-id="local_dataset/g1_torso_yaw" \
+  --robot_type="Unitree_G1_Dex1_TorsoYaw" \
+  --push_to_hub=false
+```
+
+Raw recordings without `--record-torso-yaw` should keep using `--robot_type="Unitree_G1_Dex1"`.
+
+## Replay Arms, Dex1, And Torso Yaw
+
+Dry-run the converted torso-yaw dataset first:
+
+```bash
+PYTHONNOUSERSITE=1 python unitree_lerobot/eval_robot/replay_robot.py \
+  --repo_id="local_dataset/g1_torso_yaw" \
+  --root="" \
+  --episodes=0 \
+  --frequency=30 \
+  --arm="G1_29" \
+  --ee="dex1" \
+  --motion=false \
+  --network_interface="enx00e04c39c657" \
+  --visualization=false \
+  --send_real_robot=false \
+  --replay_torso_yaw=true \
+  --dds_timeout=8
+```
+
+Then replay on the robot:
+
+```bash
+PYTHONNOUSERSITE=1 python unitree_lerobot/eval_robot/replay_robot.py \
+  --repo_id="local_dataset/g1_torso_yaw" \
+  --root="" \
+  --episodes=0 \
+  --frequency=30 \
+  --arm="G1_29" \
+  --ee="dex1" \
+  --motion=false \
+  --network_interface="enx00e04c39c657" \
+  --visualization=false \
+  --send_real_robot=true \
+  --replay_torso_yaw=true \
+  --dds_timeout=8
+```
+
 ## Replay With Rerun Visualization
 
 Start the robot image server first, then run:
@@ -188,7 +243,9 @@ The replay path in upstream `unitree_lerobot` was stale. The fixes in this branc
 - `eval_robot/utils/utils.py`: add `image_host`, `network_interface`, and `dds_timeout`.
 - `eval_robot/replay_robot.py`: validate the selected episode before DDS, honor `send_real_robot=false`, initialize DDS with the requested interface, use the current image client API, and replay only rows matching `episode_index`.
 - `eval_robot/make_robot.py`: pass `dds_timeout` to controllers that support it.
-- `eval_robot/robot_control/robot_arm.py`: seed the initial G1-29 arm target from the current arm pose and timeout if `rt/lowstate` is not received.
+- `eval_robot/robot_control/robot_arm.py`: seed the initial G1-29 arm and waist-yaw targets from the current pose, support commanding waist yaw, and timeout if `rt/lowstate` is not received.
+- `utils/constants.py`: add `Unitree_G1_Dex1_TorsoYaw` for recordings that include `body.torso_yaw`.
+- `eval_robot/replay_robot.py`: add `--replay_torso_yaw` to validate and replay the extra torso-yaw action.
 - `eval_robot/robot_control/robot_hand_unitree.py`: wait for real Dex1 state before starting control, seed gripper targets from current state, and timeout if gripper state is not received.
 - `eval_robot/utils/rerun_visualizer.py`: use `rr.Scalars` for `rerun-sdk` 0.26.x.
 
@@ -234,4 +291,3 @@ Push to your fork:
 ```bash
 git push -u origin fix/replay-41c2805
 ```
-

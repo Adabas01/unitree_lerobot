@@ -94,6 +94,14 @@ G1_DEX1_CONFIG = RobotConfig(
 )
 
 
+G1_DEX1_TORSO_YAW_CONFIG = dataclasses.replace(
+    G1_DEX1_CONFIG,
+    motors=[*G1_DEX1_CONFIG.motors, "kWaistYaw"],
+    json_state_data_name=[*G1_DEX1_CONFIG.json_state_data_name, "body.torso_yaw"],
+    json_action_data_name=[*G1_DEX1_CONFIG.json_action_data_name, "body.torso_yaw_target"],
+)
+
+
 G1_DEX1_CONFIG_SIM = RobotConfig(
     motors=[
         "kLeftShoulderPitch",
@@ -491,6 +499,7 @@ ROBOT_CONFIGS = {
     "Unitree_Z1_Single": Z1_SINGLE_CONFIG,
     "Unitree_Z1_Dual": Z1_CONFIG,
     "Unitree_G1_Dex1": G1_DEX1_CONFIG,
+    "Unitree_G1_Dex1_TorsoYaw": G1_DEX1_TORSO_YAW_CONFIG,
     "Unitree_G1_Dex1_Sim": G1_DEX1_CONFIG_SIM,
     "Unitree_G1_Dex3": G1_DEX3_CONFIG,
     "Unitree_G1_Brainco": G1_BRAINCO_CONFIG,

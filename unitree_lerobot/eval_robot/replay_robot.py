@@ -52,7 +52,17 @@ def _expected_action_dim(cfg: EvalRealConfig) -> int:
     if base_type != "legs":
         mobile_action_dim = 3 if base_type == "mobile_lift" else 1
 
-    return arm_dof + (2 * ee_dof) + mobile_action_dim
+    torso_yaw_dim = 1 if cfg.replay_torso_yaw else 0
+
+    return arm_dof + (2 * ee_dof) + mobile_action_dim + torso_yaw_dim
+
+
+def _torso_yaw_action_index(cfg: EvalRealConfig, arm_dof: int, ee_dof: int) -> int:
+    base_type = getattr(cfg, "base_type", "legs")
+    mobile_action_dim = 0
+    if base_type != "legs":
+        mobile_action_dim = 3 if base_type == "mobile_lift" else 1
+    return arm_dof + (2 * ee_dof if cfg.ee else 0) + mobile_action_dim
 
 
 def _episode_row_indices(dataset: LeRobotDataset, episode_index: int) -> list[int]:
@@ -67,6 +77,9 @@ def _episode_row_indices(dataset: LeRobotDataset, episode_index: int) -> list[in
 @parser.wrap()
 def replay_main(cfg: EvalRealConfig):
     logger_mp.info(f"Arguments: {cfg}")
+
+    if cfg.replay_torso_yaw and cfg.arm != "G1_29":
+        raise ValueError("--replay_torso_yaw is currently supported only with --arm=G1_29.")
 
     image_client = None
     camera_config = None
@@ -96,6 +109,17 @@ def replay_main(cfg: EvalRealConfig):
             f"at least {expected_dim} values."
         )
     if first_action.shape[0] != expected_dim:
+        if not cfg.replay_torso_yaw and first_action.shape[0] == expected_dim + 1:
+            raise ValueError(
+                f"Dataset action dim is {first_action.shape}, but {cfg.arm} + {cfg.ee or 'no EE'} expects "
+                f"{expected_dim} values. If this dataset includes torso yaw, rerun with "
+                "--replay_torso_yaw=true."
+            )
+        if cfg.replay_torso_yaw:
+            raise ValueError(
+                f"Dataset action dim is {first_action.shape}, but {cfg.arm} + {cfg.ee or 'no EE'} "
+                f"+ torso yaw expects exactly {expected_dim} values."
+            )
         if cfg.ee:
             raise ValueError(
                 f"Dataset action dim is {first_action.shape}, but {cfg.arm} + {cfg.ee} expects "
@@ -125,11 +149,15 @@ def replay_main(cfg: EvalRealConfig):
     arm_ctrl, arm_ik, ee_shared_mem, arm_dof, ee_dof = (
         robot_interface[key] for key in ["arm_ctrl", "arm_ik", "ee_shared_mem", "arm_dof", "ee_dof"]
     )
+    if cfg.replay_torso_yaw and not hasattr(arm_ctrl, "ctrl_waist_yaw"):
+        raise ValueError("--replay_torso_yaw requires an arm controller with ctrl_waist_yaw().")
+    torso_yaw_action_idx = _torso_yaw_action_index(cfg, arm_dof, ee_dof)
 
     logger_mp.info(f"Starting evaluation loop at {cfg.frequency} Hz.")
 
     # init pose
-    init_left_arm_pose = _as_numpy(step["observation.state"])[:arm_dof]
+    first_state = _as_numpy(step["observation.state"])
+    init_left_arm_pose = first_state[:arm_dof]
 
     try:
         user_input = input("Please enter the start signal (enter 's' to start the subsequent program):")
@@ -138,6 +166,10 @@ def replay_main(cfg: EvalRealConfig):
             logger_mp.info("Initializing robot to starting pose...")
             tau = arm_ik.solve_tau(init_left_arm_pose)
             arm_ctrl.ctrl_dual_arm(init_left_arm_pose, tau)
+            if cfg.replay_torso_yaw:
+                init_torso_yaw = float(first_state[torso_yaw_action_idx])
+                arm_ctrl.ctrl_waist_yaw(init_torso_yaw)
+                logger_mp.info(f"Initializing torso yaw to {init_torso_yaw:.4f} rad.")
             time.sleep(1)
             for idx, row_idx in enumerate(episode_rows):
                 loop_start_time = time.perf_counter()
@@ -169,13 +201,21 @@ def replay_main(cfg: EvalRealConfig):
                         ee_shared_mem["left"].value = to_scalar(left_ee_action)
                         ee_shared_mem["right"].value = to_scalar(right_ee_action)
 
+                if cfg.replay_torso_yaw:
+                    torso_yaw_action = float(action_np[torso_yaw_action_idx])
+                    arm_ctrl.ctrl_waist_yaw(torso_yaw_action)
+                    logger_mp.info(f"torso_yaw_action {torso_yaw_action:.4f}")
+
                 if cfg.visualization:
                     observation, current_arm_q = process_images_and_observations(
                         image_client,
                         camera_config,
                         arm_ctrl,
                     )
-                    state = np.concatenate((current_arm_q, left_ee_state, right_ee_state))
+                    state_parts = [current_arm_q, left_ee_state, right_ee_state]
+                    if cfg.replay_torso_yaw:
+                        state_parts.append(np.array([arm_ctrl.get_current_waist_yaw()]))
+                    state = np.concatenate(state_parts)
 
                     visualization_data(idx, observation, state, action_np, rerun_logger)
 

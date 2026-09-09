@@ -135,6 +135,7 @@ class EvalRealConfig:
     visualization: bool = False
     send_real_robot: bool = False
     use_dataset: bool = False
+    replay_torso_yaw: bool = False
 
     rename_map: dict[str, str] = field(default_factory=dict)
 

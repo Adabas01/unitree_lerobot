@@ -18,6 +18,8 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QFrame,
     QFileDialog,
+    QInputDialog,
+    QLineEdit,
 )
 
 
@@ -412,6 +414,9 @@ class DatasetPlayer(QWidget):
         self.trim_btn = QPushButton("Trim Selected Range")
         self.trim_btn.clicked.connect(self.trim_selected_frames)
 
+        self.export_selection_btn = QPushButton("Export Selected Range")
+        self.export_selection_btn.clicked.connect(self.export_selected_range)
+
         self.delete_episode_btn = QPushButton("Delete Current Episode")
         self.delete_episode_btn.clicked.connect(self.delete_current_episode)
 
@@ -421,6 +426,7 @@ class DatasetPlayer(QWidget):
             self.play_selection_btn,
             self.reset_range_btn,
             self.trim_btn,
+            self.export_selection_btn,
             self.delete_episode_btn
         ]:
             btn.setStyleSheet("""
@@ -473,6 +479,23 @@ class DatasetPlayer(QWidget):
             }
         """)
 
+        self.export_selection_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 15px;
+                font-weight: bold;
+                padding: 10px 18px;
+                border-radius: 8px;
+                background-color: #1e8449;
+                color: white;
+            }
+            QPushButton:hover:!disabled {
+                background-color: #196f3d;
+            }
+            QPushButton:disabled {
+                background-color: #999999;
+            }
+        """)
+
         control_layout = QHBoxLayout()
         control_layout.addStretch()
         control_layout.addWidget(self.play_pause_btn)
@@ -480,6 +503,7 @@ class DatasetPlayer(QWidget):
         control_layout.addWidget(self.play_selection_btn)
         control_layout.addWidget(self.reset_range_btn)
         control_layout.addWidget(self.trim_btn)
+        control_layout.addWidget(self.export_selection_btn)
         control_layout.addWidget(self.delete_episode_btn)
         control_layout.addStretch()
 
@@ -521,6 +545,7 @@ class DatasetPlayer(QWidget):
         self.range_slider.set_total_frames(0)
         self.range_info_label.setText(message)
         self.trim_btn.setEnabled(False)
+        self.export_selection_btn.setEnabled(False)
         self.delete_episode_btn.setEnabled(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
@@ -609,6 +634,7 @@ class DatasetPlayer(QWidget):
 
     def on_range_changed(self, start, end):
         self.trim_btn.setEnabled(len(self.frame_keys) > 0 and end >= start)
+        self.export_selection_btn.setEnabled(len(self.frame_keys) > 0 and end >= start)
         self.update_range_info()
 
     def on_slider_pressed(self):
@@ -682,6 +708,7 @@ class DatasetPlayer(QWidget):
             self.range_slider.set_total_frames(0)
             self.range_info_label.setText("colors directory not found")
             self.trim_btn.setEnabled(False)
+            self.export_selection_btn.setEnabled(False)
             self.delete_episode_btn.setEnabled(True)
             self.update_nav_buttons()
             return
@@ -718,11 +745,13 @@ class DatasetPlayer(QWidget):
             self.range_slider.set_total_frames(0)
             self.range_info_label.setText("No available frames")
             self.trim_btn.setEnabled(False)
+            self.export_selection_btn.setEnabled(False)
         else:
             self.range_slider.set_total_frames(len(self.frame_keys))
             self.range_slider.reset_selection()
             self.show_frame(self.current_frame_index)
             self.trim_btn.setEnabled(True)
+            self.export_selection_btn.setEnabled(True)
 
         self.delete_episode_btn.setEnabled(True)
         self.update_nav_buttons()
@@ -845,6 +874,87 @@ class DatasetPlayer(QWidget):
             )
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Trim failed:\n{str(e)}")
+
+    def export_selected_range(self):
+        if not self.frame_keys:
+            QMessageBox.warning(self, "Warning", "There are no frames that can be exported in the current episode.")
+            return
+
+        start_idx, end_idx = self.range_slider.get_selected_range()
+
+        if start_idx < 0 or end_idx >= len(self.frame_keys):
+            QMessageBox.warning(self, "Warning", "Invalid selected range.")
+            return
+
+        selected_frame_ids = self.frame_keys[start_idx:end_idx + 1]
+        selected_count = len(selected_frame_ids)
+
+        output_root, ok = QInputDialog.getText(
+            self,
+            "Export Selected Range",
+            (
+                "Output raw dataset root path:\n"
+                "The task folder and current episode will be created inside this folder."
+            ),
+            QLineEdit.Normal,
+            self.suggest_export_root()
+        )
+        if not ok:
+            return
+
+        output_root = output_root.strip()
+        if not output_root:
+            QMessageBox.warning(self, "Warning", "Output path cannot be empty.")
+            return
+        output_root = os.path.abspath(os.path.expandvars(os.path.expanduser(output_root)))
+
+        task_name = os.path.basename(os.path.abspath(self.root_dir))
+        output_task_dir = os.path.join(output_root, task_name)
+        output_episode_dir = os.path.join(output_task_dir, self.current_episode_name)
+
+        if self.paths_overlap(os.path.abspath(self.root_dir), os.path.abspath(output_episode_dir)):
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "The export destination must be outside the currently loaded task folder."
+            )
+            return
+
+        overwrite_text = ""
+        if os.path.exists(output_episode_dir):
+            overwrite_text = "\n\nThe destination episode already exists and will be overwritten."
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Export",
+            (
+                f"Current dataset: {self.current_episode_name}\n"
+                f"Frames to export: {start_idx} ~ {end_idx} (total {selected_count} frames)\n"
+                f"Destination:\n{output_episode_dir}"
+                f"{overwrite_text}\n\n"
+                f"Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.is_playing = False
+        self.update_play_button_text()
+
+        try:
+            self.export_frame_range_to_dataset(output_root, selected_frame_ids)
+            QMessageBox.information(
+                self,
+                "Done",
+                (
+                    f"Export completed.\n"
+                    f"{selected_count} frames were saved as:\n{output_episode_dir}"
+                )
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Export failed:\n{str(e)}")
 
     def delete_current_episode(self):
         if not self.episodes or not self.current_episode_name:
@@ -1014,6 +1124,118 @@ class DatasetPlayer(QWidget):
 
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(json_obj, f, ensure_ascii=False, indent=4)
+
+    def suggest_export_root(self):
+        task_dir = os.path.abspath(self.root_dir)
+        raw_root = os.path.dirname(task_dir)
+        parent_dir = os.path.dirname(raw_root)
+        raw_name = os.path.basename(raw_root)
+
+        if raw_name.endswith("_raw"):
+            export_name = f"{raw_name[:-4]}_task_only_raw"
+        else:
+            export_name = f"{raw_name}_task_only"
+
+        return os.path.join(parent_dir, export_name)
+
+    def paths_overlap(self, first_path, second_path):
+        first_path = os.path.abspath(first_path)
+        second_path = os.path.abspath(second_path)
+        try:
+            common_path = os.path.commonpath([first_path, second_path])
+        except ValueError:
+            return False
+        return common_path == first_path or common_path == second_path
+
+    def export_frame_range_to_dataset(self, output_root, selected_frame_ids):
+        source_episode_dir = os.path.join(self.root_dir, self.current_episode_name)
+        source_json_path = os.path.join(source_episode_dir, "data.json")
+
+        if not os.path.isdir(source_episode_dir):
+            raise RuntimeError(f"Source episode directory does not exist: {source_episode_dir}")
+
+        if not os.path.isfile(source_json_path):
+            raise RuntimeError(f"data.json does not exist: {source_json_path}")
+
+        with open(source_json_path, "r", encoding="utf-8") as f:
+            json_obj = json.load(f)
+
+        if "data" not in json_obj or not isinstance(json_obj["data"], list):
+            raise RuntimeError("Invalid data.json format: missing data array.")
+
+        data_by_idx = {
+            item.get("idx"): item
+            for item in json_obj["data"]
+            if isinstance(item, dict) and item.get("idx") is not None
+        }
+
+        missing_idxs = [frame_id for frame_id in selected_frame_ids if frame_id not in data_by_idx]
+        if missing_idxs:
+            raise RuntimeError(f"data.json is missing frame indexes: {missing_idxs[:10]}")
+
+        task_name = os.path.basename(os.path.abspath(self.root_dir))
+        output_task_dir = os.path.join(output_root, task_name)
+        output_episode_dir = os.path.join(output_task_dir, self.current_episode_name)
+
+        if os.path.exists(output_episode_dir):
+            shutil.rmtree(output_episode_dir)
+
+        os.makedirs(output_episode_dir, exist_ok=True)
+
+        new_data_list = []
+
+        for new_idx, old_idx in enumerate(selected_frame_ids):
+            old_item = data_by_idx[old_idx]
+            new_item = json.loads(json.dumps(old_item, ensure_ascii=False))
+            new_item["idx"] = new_idx
+
+            for media_key in ["colors", "depths", "audios"]:
+                if isinstance(new_item.get(media_key), dict):
+                    new_item[media_key] = self.copy_media_group(
+                        source_episode_dir,
+                        output_episode_dir,
+                        media_key,
+                        new_item[media_key],
+                        new_idx,
+                    )
+
+            new_data_list.append(new_item)
+
+        json_obj["data"] = new_data_list
+
+        output_json_path = os.path.join(output_episode_dir, "data.json")
+        with open(output_json_path, "w", encoding="utf-8") as f:
+            json.dump(json_obj, f, ensure_ascii=False, indent=4)
+
+        return output_episode_dir
+
+    def copy_media_group(self, source_episode_dir, output_episode_dir, media_key, media_paths, new_idx):
+        output_paths = {}
+
+        for item_key, relative_path in media_paths.items():
+            if not relative_path:
+                output_paths[item_key] = relative_path
+                continue
+
+            source_path = os.path.join(source_episode_dir, relative_path)
+            if not os.path.isfile(source_path):
+                raise RuntimeError(f"Referenced media file does not exist: {source_path}")
+
+            extension = os.path.splitext(relative_path)[1]
+            if not extension:
+                extension = ".npy" if media_key == "audios" else ".jpg"
+
+            if media_key == "audios":
+                new_relative_path = f"{media_key}/audio_{new_idx:06d}_{item_key}{extension}"
+            else:
+                new_relative_path = f"{media_key}/{new_idx:06d}_{item_key}{extension}"
+
+            destination_path = os.path.join(output_episode_dir, new_relative_path)
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            shutil.copy2(source_path, destination_path)
+            output_paths[item_key] = new_relative_path
+
+        return output_paths
 
 
 def main():

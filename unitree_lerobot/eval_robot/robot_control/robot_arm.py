@@ -67,10 +67,14 @@ class DataBuffer:
 
 
 class G1_29_ArmController:
+    WAIST_YAW_MIN = -2.618
+    WAIST_YAW_MAX = 2.618
+
     def __init__(self, motion_mode=False, simulation_mode=False, dds_timeout=8.0):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
+        self.waist_yaw_target = 0.0
         self.motion_mode = motion_mode
         self.simulation_mode = simulation_mode
         self.kp_high = 300.0
@@ -127,6 +131,7 @@ class G1_29_ArmController:
 
         self.all_motor_q = self.get_current_motor_q()
         self.q_target = self.get_current_dual_arm_q().copy()
+        self.waist_yaw_target = float(self.all_motor_q[G1_29_JointIndex.kWaistYaw])
         logger_mp.info(f"Current all body motor state q:\n{self.all_motor_q} \n")
         logger_mp.info(f"Current two arms motor state q:\n{self.get_current_dual_arm_q()}\n")
         logger_mp.info("Lock all joints except two arms...\n")
@@ -187,11 +192,16 @@ class G1_29_ArmController:
             with self.ctrl_lock:
                 arm_q_target = self.q_target
                 arm_tauff_target = self.tauff_target
+                waist_yaw_target = self.waist_yaw_target
 
             if self.simulation_mode:
                 clipped_arm_q_target = arm_q_target
             else:
                 clipped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit=self.arm_velocity_limit)
+
+            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].q = waist_yaw_target
+            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].dq = 0
+            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].tau = 0
 
             for idx, id in enumerate(G1_29_JointArmIndex):
                 self.msg.motor_cmd[id].q = clipped_arm_q_target[idx]
@@ -217,6 +227,20 @@ class G1_29_ArmController:
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+
+    def ctrl_waist_yaw(self, q_target):
+        """Set target q for the G1 waist yaw joint."""
+        q_target = float(np.clip(q_target, self.WAIST_YAW_MIN, self.WAIST_YAW_MAX))
+        with self.ctrl_lock:
+            self.waist_yaw_target = q_target
+
+    def get_current_waist_yaw(self):
+        """Return current state q of the G1 waist yaw joint."""
+        return float(self.lowstate_buffer.GetData().motor_state[G1_29_JointIndex.kWaistYaw].q)
+
+    def get_waist_yaw_limits(self):
+        """Return software limits for the G1 waist yaw joint."""
+        return self.WAIST_YAW_MIN, self.WAIST_YAW_MAX
 
     def get_mode_machine(self):
         """Return current dds mode machine."""
