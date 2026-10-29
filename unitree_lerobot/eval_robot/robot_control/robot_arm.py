@@ -70,13 +70,15 @@ class G1_29_ArmController:
     WAIST_YAW_MIN = -2.618
     WAIST_YAW_MAX = 2.618
 
-    def __init__(self, motion_mode=False, simulation_mode=False, dds_timeout=8.0):
+    def __init__(self, motion_mode=False, simulation_mode=False, dds_timeout=8.0,
+                 controller_alignment=False):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
         self.waist_yaw_target = 0.0
         self.motion_mode = motion_mode
         self.simulation_mode = simulation_mode
+        self.controller_alignment = controller_alignment
         self.kp_high = 300.0
         self.kd_high = 3.0
         self.kp_low = 80.0
@@ -194,10 +196,12 @@ class G1_29_ArmController:
                 arm_tauff_target = self.tauff_target
                 waist_yaw_target = self.waist_yaw_target
 
-            if self.simulation_mode:
+            if self.simulation_mode and not self.controller_alignment:
                 clipped_arm_q_target = arm_q_target
             else:
-                clipped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit=self.arm_velocity_limit)
+                clipped_arm_q_target = self.clip_arm_q_target(
+                    arm_q_target, velocity_limit=self.arm_velocity_limit,
+                )
 
             self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].q = waist_yaw_target
             self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].dq = 0

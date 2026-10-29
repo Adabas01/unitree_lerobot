@@ -3,6 +3,7 @@ import meshcat.geometry as mg
 import numpy as np
 import pinocchio as pin
 import time
+from pathlib import Path
 from pinocchio import casadi as cpin
 from pinocchio.visualize import MeshcatVisualizer
 import os
@@ -17,8 +18,38 @@ parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.append(parent2_dir)
 
 
+GRAVITY_MODEL_LEGACY_HAND14 = "legacy-hand14"
+GRAVITY_MODEL_G1D_DEX1 = "g1d-dex1"
+GRAVITY_MODELS = (GRAVITY_MODEL_G1D_DEX1, GRAVITY_MODEL_LEGACY_HAND14)
+
+G1_29_ARM_JOINT_NAMES = (
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+)
+
+G1_ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "g1"
+G1D_DEX1_GRAVITY_URDF = G1_ASSET_DIR / "g1d_dex1_gravity.urdf"
+
+
 class G1_29_ArmIK:
-    def __init__(self, Unit_Test=False, Visualization=False):
+    def __init__(
+        self,
+        Unit_Test=False,
+        Visualization=False,
+        gravity_model=GRAVITY_MODEL_LEGACY_HAND14,
+    ):
         np.set_printoptions(precision=5, suppress=True, linewidth=200)
 
         self.Unit_Test = Unit_Test
@@ -68,6 +99,47 @@ class G1_29_ArmIK:
         self.reduced_robot = self.robot.buildReducedRobot(
             list_of_joints_to_lock=self.mixed_jointsToLockIDs,
             reference_configuration=np.array([0.0] * self.robot.model.nq),
+        )
+
+        self.gravity_model_name = gravity_model
+        if gravity_model == GRAVITY_MODEL_LEGACY_HAND14:
+            self.gravity_model = self.reduced_robot.model
+            self.gravity_data = self.reduced_robot.data
+            self.gravity_model_path = G1_ASSET_DIR / "g1_body29_hand14.urdf"
+        elif gravity_model == GRAVITY_MODEL_G1D_DEX1:
+            if not G1D_DEX1_GRAVITY_URDF.is_file():
+                raise FileNotFoundError(f"Missing G1-D Dex1 gravity model: {G1D_DEX1_GRAVITY_URDF}")
+            full_model = pin.buildModelFromUrdf(str(G1D_DEX1_GRAVITY_URDF))
+            arm_joint_names = set(G1_29_ARM_JOINT_NAMES)
+            joints_to_lock = [
+                joint_id
+                for joint_id, joint_name in enumerate(full_model.names)
+                if joint_id != 0 and joint_name not in arm_joint_names
+            ]
+            self.gravity_model = pin.buildReducedModel(
+                full_model,
+                joints_to_lock,
+                pin.neutral(full_model),
+            )
+            self.gravity_data = self.gravity_model.createData()
+            self.gravity_model_path = G1D_DEX1_GRAVITY_URDF
+        else:
+            raise ValueError(f"Unknown gravity model {gravity_model!r}; expected one of {GRAVITY_MODELS}")
+
+        gravity_joint_names = tuple(self.gravity_model.names[1:])
+        if self.gravity_model.nq != 14 or self.gravity_model.nv != 14:
+            raise ValueError(
+                f"Gravity model {gravity_model!r} must reduce to 14 DoF; "
+                f"got nq={self.gravity_model.nq}, nv={self.gravity_model.nv}"
+            )
+        if gravity_joint_names != G1_29_ARM_JOINT_NAMES:
+            raise ValueError(
+                f"Gravity model {gravity_model!r} has unexpected joint order: {gravity_joint_names}"
+            )
+        logger_mp.info(
+            "G1 gravity model: %s (%s)",
+            self.gravity_model_name,
+            self.gravity_model_path,
         )
 
         self.reduced_robot.model.addFrame(
@@ -234,9 +306,7 @@ class G1_29_ArmIK:
 
             self.init_data = sol_q
 
-            sol_tauff = pin.rnea(
-                self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv)
-            )
+            sol_tauff = self._gravity_torque(sol_q)
 
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
@@ -257,9 +327,7 @@ class G1_29_ArmIK:
 
             self.init_data = sol_q
 
-            sol_tauff = pin.rnea(
-                self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv)
-            )
+            sol_tauff = self._gravity_torque(sol_q)
 
             logger_mp.error(
                 f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}"
@@ -270,20 +338,36 @@ class G1_29_ArmIK:
             # return sol_q, sol_tauff
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
 
+    def _gravity_torque(self, arm_q):
+        arm_q = np.asarray(arm_q, dtype=np.float64)
+        if arm_q.shape != (14,):
+            raise ValueError(f"Expected 14 arm positions, got shape {arm_q.shape}")
+        return pin.rnea(
+            self.gravity_model,
+            self.gravity_data,
+            arm_q,
+            np.zeros(self.gravity_model.nv),
+            np.zeros(self.gravity_model.nv),
+        )
+
+    def clip_arm_positions(self, arm_q):
+        """Clamp a left-then-right 14-joint arm target to the selected model limits."""
+        arm_q = np.asarray(arm_q, dtype=np.float64)
+        if arm_q.shape != (14,):
+            raise ValueError(f"Expected 14 arm positions, got shape {arm_q.shape}")
+        return np.clip(
+            arm_q,
+            self.gravity_model.lowerPositionLimit,
+            self.gravity_model.upperPositionLimit,
+        )
+
     def solve_tau(self, current_lr_arm_motor_q=None, current_lr_arm_motor_dq=None):
         try:
-            sol_tauff = pin.rnea(
-                self.reduced_robot.model,
-                self.reduced_robot.data,
-                current_lr_arm_motor_q,
-                np.zeros(14),
-                np.zeros(self.reduced_robot.model.nv),
-            )
-            return sol_tauff
+            return self._gravity_torque(current_lr_arm_motor_q)
 
         except Exception as e:
             logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
-            return np.zeros(self.reduced_robot.model.nv)
+            return np.zeros(self.gravity_model.nv)
 
 
 class G1_23_ArmIK:

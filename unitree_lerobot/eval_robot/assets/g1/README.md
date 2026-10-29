@@ -32,3 +32,25 @@ MJCF/URDF for the G1 robot:
 ## Note for teleoperate
 
 g1_body29_hand14 is modified from [g1_29dof_with_hand_rev_1_0](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/g1_29dof_with_hand_rev_1_0.urdf)
+
+## Gravity feedforward models
+
+The OpenPI G1 runners use `g1d_dex1_gravity.urdf` by default for gravity
+feedforward. It contains the G1-D + Dex1 inertial model used by the Isaac Lab
+simulation. Only its kinematic and inertial data are loaded by Pinocchio; the
+existing `g1_body29_hand14.urdf` remains the inverse-kinematics model.
+
+The model can be selected independently of real or simulated DDS operation:
+
+```bash
+# G1-D + Dex1 dynamics (default for the OpenPI runners)
+--gravity-model g1d-dex1
+
+# Restore the previous gravity torques exactly
+--gravity-model legacy-hand14
+```
+
+The G1-D file was copied from
+`unitree_sim_isaaclab/assets/robots/g1d-dex1/urdf/g1d_dex1.urdf`, which was
+prepared from Unitree's `unitree_ros` commit
+`7d6075f7f58588b189b940130e3edab3c839b2df`.

@@ -96,13 +96,17 @@ def setup_robot_interface(args: argparse.Namespace) -> dict[str, Any]:
     """
     # ---------- Arm ----------
     arm_spec = ARM_CONFIG[args.arm]
-    arm_ik = arm_spec["ik_solver"]()
+    arm_ik = _build_controller(
+        arm_spec["ik_solver"],
+        gravity_model=getattr(args, "gravity_model", "legacy-hand14"),
+    )
     is_sim = getattr(args, "sim", False)
     arm_ctrl = _build_controller(
         arm_spec["controller"],
         motion_mode=args.motion,
         simulation_mode=is_sim,
         dds_timeout=getattr(args, "dds_timeout", 8.0),
+        controller_alignment=getattr(args, "controller_alignment", False),
     )
 
     # ---------- End Effector (optional) ----------
@@ -161,13 +165,16 @@ def setup_robot_interface(args: argparse.Namespace) -> dict[str, Any]:
     if is_sim:
         reset_pose_publisher = ChannelPublisher("rt/reset_pose/cmd", String_)
         reset_pose_publisher.Init()
-        from unitree_lerobot.eval_robot.utils.sim_state_topic import (
-            start_sim_state_subscribe,
-            start_sim_reward_subscribe,
-        )
+        sim_state_subscriber = None
+        sim_reward_subscriber = None
+        if getattr(args, "sim_helpers", True):
+            from unitree_lerobot.eval_robot.utils.sim_state_topic import (
+                start_sim_state_subscribe,
+                start_sim_reward_subscribe,
+            )
 
-        sim_state_subscriber = start_sim_state_subscribe()
-        sim_reward_subscriber = start_sim_reward_subscribe()
+            sim_state_subscriber = start_sim_state_subscribe()
+            sim_reward_subscriber = start_sim_reward_subscribe()
         if getattr(args, "save_data", False) and getattr(args, "task_dir", None):
             episode_writer = EpisodeWriter(args.task_dir, frequency=30, image_size=[640, 480])
         return {
@@ -207,8 +214,13 @@ def process_images_and_observations(img_client, camera_config, arm_ctrl):
         if camera_config['head_camera']['enable_zmq']:
             head_img = img_client.get_head_frame()
             if head_img is not None:
-                observation["observation.images.cam_left_high"] = to_tensor_rgb(head_img.bgr[:, :camera_config['head_camera']['image_shape'][1]//2])
-                observation["observation.images.cam_right_high"] = to_tensor_rgb(head_img.bgr[:, camera_config['head_camera']['image_shape'][1]//2:])
+                head_bgr = head_img.bgr
+                if camera_config['head_camera'].get('binocular', False):
+                    midpoint = head_bgr.shape[1] // 2
+                    observation["observation.images.cam_left_high"] = to_tensor_rgb(head_bgr[:, :midpoint])
+                    observation["observation.images.cam_right_high"] = to_tensor_rgb(head_bgr[:, midpoint:])
+                else:
+                    observation["observation.images.cam_left_high"] = to_tensor_rgb(head_bgr)
             else:
                 logger_mp.warning("Head image is None!")
 
