@@ -153,6 +153,8 @@ PYTHONNOUSERSITE=1 python unitree_lerobot/eval_robot/replay_robot.py \
 
 If the raw XR recording was collected with `--record-torso-yaw`, convert it with the torso-yaw robot type. This appends `body.torso_yaw` to `observation.state` and `body.torso_yaw_target` to `action`.
 
+Point `--raw-dir` at the task folder you want to convert (for example, `$HOME/datasets/conveyor`). The converter finds episode folders containing `data.json` beneath that directory, including nested recordings. A single episode directory also works. Select a folder containing only torso-yaw recordings when using the torso-yaw robot type.
+
 ```bash
 cd ~/unitree_g1/unitree_lerobot
 conda activate unitree_lerobot
@@ -160,8 +162,7 @@ conda activate unitree_lerobot
 PYTHONNOUSERSITE=1 python unitree_lerobot/utils/convert_unitree_json_to_lerobot.py \
   --raw-dir="$HOME/datasets/g1_torso_yaw_raw" \
   --repo-id="local_dataset/g1_torso_yaw" \
-  --robot_type="Unitree_G1_Dex1_TorsoYaw" \
-  --push_to_hub=false
+  --robot-type="Unitree_G1_Dex1_TorsoYaw"
 ```
 
 Raw recordings without `--record-torso-yaw` should keep using `--robot_type="Unitree_G1_Dex1"`.

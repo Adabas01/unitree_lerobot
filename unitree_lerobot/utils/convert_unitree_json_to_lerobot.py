@@ -20,7 +20,6 @@ import cv2
 import tqdm
 import tyro
 import json
-import glob
 import dataclasses
 import shutil
 import numpy as np
@@ -77,19 +76,23 @@ class JsonDataset:
         self.normalize_dex1_gripper = normalize_dex1_gripper and robot_type in DEX1_ROBOT_TYPES
 
     def _init_paths(self) -> None:
-        """Initialize episode and task paths."""
+        """Find episode folders under a dataset, task, or episode directory."""
 
         self.episode_paths = []
-        self.task_paths = []
 
-        for task_path in glob.glob(os.path.join(self.data_dirs, "*")):
-            if os.path.isdir(task_path):
-                episode_paths = glob.glob(os.path.join(task_path, "*"))
-                if episode_paths:
-                    self.task_paths.append(task_path)
-                    self.episode_paths.extend(episode_paths)
+        for directory, subdirs, files in os.walk(self.data_dirs):
+            if self.json_file in files:
+                self.episode_paths.append(directory)
+                # Images and other episode assets cannot contain more episodes.
+                subdirs.clear()
+            else:
+                subdirs[:] = [name for name in subdirs if not name.startswith(".")]
+
+        if not self.episode_paths:
+            raise FileNotFoundError(f"No episodes containing {self.json_file} found under {self.data_dirs}")
 
         self.episode_paths = sorted(self.episode_paths)
+        self.task_paths = sorted({os.path.dirname(path) for path in self.episode_paths})
         self.episode_ids = list(range(len(self.episode_paths)))
 
     def __len__(self) -> int:
