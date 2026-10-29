@@ -64,8 +64,10 @@ class Args:
     prompt: str = TASK_PROMPT
     arm: str = "G1_29"
     ee: str = "dex1"
+    gravity_model: str = "g1d-dex1"
     motion: bool = False
     sim: bool = False
+    controller_alignment: bool = False
     visualization: bool = False
     camera_only: bool = False
     home_before_start: bool = False
@@ -88,6 +90,7 @@ class Args:
     arm_smoothing: float = 0.0
     gripper_smoothing: float = 0.0
     gripper_scale: float = 5.4
+    gripper_closure_scale: float = 1.0
     policy_layout: str = "interleaved"
     print_every: int = 10
     profile_timing: bool = False
@@ -117,8 +120,18 @@ def parse_args() -> Args:
     parser.add_argument("--prompt", default=Args.prompt)
     parser.add_argument("--arm", default=Args.arm)
     parser.add_argument("--ee", default=Args.ee)
+    parser.add_argument(
+        "--gravity-model",
+        choices=("g1d-dex1", "legacy-hand14"),
+        default=Args.gravity_model,
+        help="Dynamics model used for gravity feedforward; legacy-hand14 restores the previous torques.",
+    )
     parser.add_argument("--motion", type=_parse_bool, default=Args.motion)
     parser.add_argument("--sim", type=_parse_bool, default=Args.sim)
+    parser.add_argument(
+        "--controller-alignment", type=_parse_bool, default=Args.controller_alignment,
+        help="Use packet-matched simulation control; ignored for the real robot.",
+    )
     parser.add_argument("--visualization", type=_parse_bool, default=Args.visualization)
     parser.add_argument("--camera-only", type=_parse_bool, default=Args.camera_only)
     parser.add_argument("--home-before-start", type=_parse_bool, default=Args.home_before_start)
@@ -141,6 +154,12 @@ def parse_args() -> Args:
     parser.add_argument("--arm-smoothing", type=float, default=Args.arm_smoothing)
     parser.add_argument("--gripper-smoothing", type=float, default=Args.gripper_smoothing)
     parser.add_argument("--gripper-scale", type=float, default=Args.gripper_scale)
+    parser.add_argument(
+        "--gripper-closure-scale",
+        type=float,
+        default=Args.gripper_closure_scale,
+        help="Multiply distance from fully open; values above 1 close Dex1 farther.",
+    )
     parser.add_argument("--policy-layout", choices=("interleaved", "unitree"), default=Args.policy_layout)
     parser.add_argument("--print-every", type=int, default=Args.print_every)
     parser.add_argument("--profile-timing", type=_parse_bool, default=Args.profile_timing)
@@ -185,8 +204,10 @@ def _camera_observation_from_client(img_client: Any, camera_config: dict[str, An
     if camera_config["head_camera"]["enable_zmq"]:
         head_img = img_client.get_head_frame()
         if head_img is not None and head_img.bgr is not None:
-            width = int(camera_config["head_camera"]["image_shape"][1])
-            observation["observation.images.cam_left_high"] = _bgr_to_rgb(head_img.bgr[:, : width // 2])
+            head_bgr = head_img.bgr
+            if camera_config["head_camera"].get("binocular", False):
+                head_bgr = head_bgr[:, : head_bgr.shape[1] // 2]
+            observation["observation.images.cam_left_high"] = _bgr_to_rgb(head_bgr)
 
     if camera_config["left_wrist_camera"]["enable_zmq"]:
         left_wrist = img_client.get_left_wrist_frame()
@@ -281,6 +302,14 @@ def _read_gripper_state(ee_shared_mem: dict[str, Any], ee_dof: int) -> np.ndarra
     return state[: 2 * ee_dof]
 
 
+def _scale_gripper_closure(gripper_target_norm: np.ndarray, closure_scale: float) -> np.ndarray:
+    """Scale closure around fully open: 1 stays open, while lower targets move toward 0."""
+    target = np.asarray(gripper_target_norm, dtype=np.float64)
+    if closure_scale == 1.0:
+        return target
+    return np.clip(1.0 - closure_scale * (1.0 - target), 0.0, 1.0)
+
+
 def _clip_action(
     action_unitree: np.ndarray,
     current_arm_q: np.ndarray,
@@ -291,6 +320,7 @@ def _clip_action(
     arm_target = current_arm_q + np.clip(arm_target - current_arm_q, -args.max_arm_step, args.max_arm_step)
 
     gripper_target_norm = np.clip(action_unitree[14:16], 0.0, 1.0)
+    gripper_target_norm = _scale_gripper_closure(gripper_target_norm, args.gripper_closure_scale)
     gripper_target_raw = gripper_target_norm * args.gripper_scale
     gripper_target_raw = gripper_state_raw + np.clip(
         gripper_target_raw - gripper_state_raw,
@@ -344,7 +374,12 @@ def _move_arms_home(arm_ctrl: Any, arm_ik: Any, ee_shared_mem: dict[str, Any], a
             -args.home_max_step,
             args.home_max_step,
         )
-        tau = arm_ik.solve_tau(target)
+        measured_q = arm_ctrl.get_current_dual_arm_q().astype(np.float64, copy=False)
+        tau = (
+            arm_ik.solve_tau(measured_q)
+            if getattr(args, "gravity_feedforward", True)
+            else np.zeros_like(target)
+        )
         arm_ctrl.ctrl_dual_arm(target, tau)
         if args.home_open_grippers:
             current_gripper_raw = _read_gripper_state(ee_shared_mem, 1)
@@ -357,14 +392,25 @@ def _move_arms_home(arm_ctrl: Any, arm_ik: Any, ee_shared_mem: dict[str, Any], a
         previous_target = target
         time.sleep(max(0.0, loop_dt - (time.perf_counter() - loop_start)))
 
-    tau = arm_ik.solve_tau(home_q)
+    measured_q = arm_ctrl.get_current_dual_arm_q().astype(np.float64, copy=False)
+    tau = (
+        arm_ik.solve_tau(measured_q)
+        if getattr(args, "gravity_feedforward", True)
+        else np.zeros_like(home_q)
+    )
     arm_ctrl.ctrl_dual_arm(home_q, tau)
     if args.home_open_grippers:
         _write_gripper_targets(ee_shared_mem, gripper_target_raw, gripper_target_raw)
 
     wait_start = time.monotonic()
     while time.monotonic() - wait_start < args.home_timeout:
-        current_q = arm_ctrl.get_current_dual_arm_q()
+        current_q = arm_ctrl.get_current_dual_arm_q().astype(np.float64, copy=False)
+        tau = (
+            arm_ik.solve_tau(current_q)
+            if getattr(args, "gravity_feedforward", True)
+            else np.zeros_like(home_q)
+        )
+        arm_ctrl.ctrl_dual_arm(home_q, tau)
         max_error = float(np.max(np.abs(current_q - home_q)))
         if max_error <= args.home_tolerance:
             LOGGER.info("Arms reached home position; max_error=%.4f", max_error)
@@ -389,6 +435,8 @@ def main() -> None:
         raise ValueError("--prefetch-chunk-steps must be >= 0.")
     if args.gripper_scale <= 0:
         raise ValueError("--gripper-scale must be positive.")
+    if not np.isfinite(args.gripper_closure_scale) or args.gripper_closure_scale <= 0:
+        raise ValueError("--gripper-closure-scale must be finite and positive.")
     if args.home_duration <= 0:
         raise ValueError("--home-duration must be positive.")
     if args.home_max_step <= 0:
@@ -497,12 +545,14 @@ def main() -> None:
 
         LOGGER.info(
             "execute_actions=%s execute_grippers=%s async_policy=%s prefetch_chunk_steps=%d. "
-            "action_mode=%s profile_timing=%s. The script will query policy actions either way.",
+            "action_mode=%s gripper_closure_scale=%.3f profile_timing=%s. "
+            "The script will query policy actions either way.",
             args.execute_actions,
             args.execute_grippers,
             args.async_policy,
             args.prefetch_chunk_steps,
             args.action_mode,
+            args.gripper_closure_scale,
             args.profile_timing,
         )
         user_input = input("Enter 's' to start OpenPI evaluation loop: ")
@@ -615,9 +665,13 @@ def main() -> None:
                 else float(np.max(np.abs(action_unitree - previous_policy_action_unitree)))
             )
             policy_gripper_norm = np.clip(action_unitree[14:16], 0.0, 1.0)
+            scaled_gripper_norm = _scale_gripper_closure(
+                policy_gripper_norm,
+                args.gripper_closure_scale,
+            )
             if args.action_mode == "direct":
                 arm_target = action_unitree[:14]
-                gripper_target_raw = policy_gripper_norm * args.gripper_scale
+                gripper_target_raw = scaled_gripper_norm * args.gripper_scale
             else:
                 arm_target, gripper_target_raw = _clip_action(action_unitree, current_arm_q, gripper_state_raw, args)
                 arm_target = _smooth_target(arm_target, previous_arm_target, args.arm_smoothing)
@@ -626,6 +680,7 @@ def main() -> None:
                     previous_gripper_target_raw,
                     args.gripper_smoothing,
                 )
+            arm_target = arm_ik.clip_arm_positions(arm_target)
             arm_cmd_jump_max = (
                 float("nan")
                 if previous_arm_target is None
@@ -643,7 +698,8 @@ def main() -> None:
 
             stage_start = time.perf_counter()
             if args.execute_actions:
-                tau = arm_ik.solve_tau(arm_target)
+                measured_arm_q = arm_ctrl.get_current_dual_arm_q().astype(np.float64, copy=False)
+                tau = arm_ik.solve_tau(measured_arm_q)
                 arm_ctrl.ctrl_dual_arm(arm_target, tau)
                 if args.execute_grippers:
                     _write_gripper_targets(ee_shared_mem, gripper_target_raw[0], gripper_target_raw[1])
